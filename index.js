@@ -6,14 +6,229 @@ const sessionClient = new dialogflow.SessionsClient();
 admin.initializeApp();
 const DIALOGFLOW_PROJECT_ID = "laundryfirebasebackend";
 
-const accountSid = "****"
-const authToken = "******"
-const twilioNumber = "+12345678";
-const agentNumber =  "+87654321";
+const accountSid = "***"
+const authToken = "***"
+const twilioNumber = "+***";
+const agentNumber =  "+***";
+// const agentNumber =  "+923006411461";
+// const agentNumber = "+15183366662";
 
+
+const workspaceSid = "WS5713fe073d8c94831833cf81a39c2f6d";
 
 
 const twilioClient = require("twilio")(accountSid, authToken);
+
+// const targetWorkspaceSid = 'YOUR_TARGET_WORKSPACE_SID'; // Replace with the workspace SID you want to check
+
+// Function to list all workspaces and check if the targetWorkspaceSid exists
+const  checkIfWorkspaceExists = async (req, res) => {
+    targetWorkspaceSid = req.body.targetWorkspaceSid;
+  try {
+    const workspaces = await twilioClient.taskrouter.v1.workspaces.list();
+    
+    // Check if the targetWorkspaceSid exists in the list of workspaces
+    const workspaceExists = workspaces.some(workspace => workspace.sid === targetWorkspaceSid);
+
+    if (workspaceExists) {
+        res.send(`Workspace with SID ${targetWorkspaceSid} exists.`);
+      console.log(`Workspace with SID ${targetWorkspaceSid} exists.`);
+    } else {
+        res.send(`Workspace with SID ${targetWorkspaceSid} does not exist.`);
+      console.log(`Workspace with SID ${targetWorkspaceSid} does not exist.`);
+    }
+  } catch (error) {
+    res.send(`Error listing workspaces: ${error}`);
+    console.error('Error listing workspaces:', error);
+  }
+}
+
+const twilioWebhook = functions.https.onRequest(async (request, response) => {
+    try {
+        console.log("Received request from Twilio");
+
+        const incomingMessage = request.body.Body;
+        const incomingNumber = request.body.From;
+        //==================Help Intent===================================
+        if (incomingMessage.toLowerCase().includes("help")) {
+            // const userOrder = await fetchOrderByPhoneNumber(incomingNumber);
+            const dialogflowResponse = await sendAgentNotification(incomingNumber, incomingMessage);
+            console.log("Working here");
+            console.log(dialogflowResponse);
+            
+            const taskAttributes = {
+                type: "help",
+                message: incomingMessage,
+            };
+            // const task = await twilioClient.flexApi.taskrouter.workspaces(workspaceSid)
+            const task = await twilioClient.taskrouter.v1.workspaces(workspaceSid)
+                .tasks
+                .create({
+                    attributes: JSON.stringify(taskAttributes),
+                    taskChannel: "chat", // or the appropriate channel type
+                });
+
+            // Send confirmation message to the user
+            await twilioClient.messages.create({
+                body: "Help is on the way. You will be contacted by an agent soon.",
+                from: twilioNumber,
+                to: incomingNumber
+            });
+
+            response.set("Content-Type", "text/xml");
+            response.send(`<Response><Message>${dialogflowResponse}</Message></Response>`);
+            return;
+        }
+        //================================================
+        // const userOrder = await fetchOrderByPhoneNumber(incomingNumber);
+        let dialogflowResponses;
+        let dialogflowResponse;
+
+        console.log(`Incoming message: ${incomingMessage} from number: ${incomingNumber}`);
+        // const sessionPath = sessionClient.projectAgentSessionPath('laundryfirebasebackend', incomingNumber); 
+        // const dialogflowRequest = {
+        //     session: sessionPath,
+        //     queryInput: {
+        //         text: {
+        //             text: incomingMessage,
+        //             languageCode: "en-US",
+        //         },
+        //     },
+        // };
+
+
+        // console.log("Sending message to Dialogflow for intent detection.");
+
+        try {
+            dialogflowResponses = await sessionClient.detectIntent(dialogflowRequest);
+        } catch (error) {
+            console.error("Error during Dialogflow intent detection:", error);
+            // Handle the error accordingly, e.g., send a default response and exit the function
+            //  dialogflowResponse =  await sendAgentNotification(userOrder,incomingNumber,incomingMessage);
+            dialogflowResponse = await sendAgentNotification(incomingNumber, incomingMessage);
+            response.set("Content-Type", "text/xml");
+            response.send(`<Response><Message>${dialogflowResponse}</Message></Response>`);
+            return; // Exit the function
+        }
+
+
+
+        const intentName = dialogflowResponses[0].queryResult.intent.displayName;
+        console.log(`Detected intent: ${intentName}`);
+
+        dialogflowResponse = dialogflowResponses[0].queryResult.fulfillmentText;
+
+        if (intentName.endsWith("FAQ")) {
+            dialogflowResponse = await handleFAQIntent(intentName);
+        }
+        else if (intentName === 'HelpIntent') {
+            //  dialogflowResponse = await sendAgentNotification(userOrder,incomingNumber,incomingMessage);
+            dialogflowResponse = await sendAgentNotification(incomingNumber, incomingMessage);
+
+        }
+        else if (!userOrder) {
+            dialogflowResponse = handleNoOrder();
+        }
+        else if (intentName === "Reschedule") {
+            const parameters = dialogflowResponses[0].queryResult.parameters;
+            const desiredDate = parameters && parameters.fields && parameters.fields.date && parameters.fields.date.stringValue
+                ? new Date(parameters.fields.date.stringValue)
+                : null;
+            console.log("desired date:", desiredDate);
+            const availableDays = await fetchAvailablePickupDays(); // Fetch the available days
+
+            //    dialogflowResponse = await handleRescheduling(userOrder, desiredDate, availableDays);
+            dialogflowResponse = await handleRescheduling(desiredDate, availableDays);
+            //...handle reschedule
+        }
+
+        console.log(`Sending response: ${dialogflowResponse}`);
+        response.set("Content-Type", "text/xml");
+        response.send(`<Response><Message>${dialogflowResponse}</Message></Response>`);
+
+    } catch (error) {
+        console.error("Error processing the request:", error);
+        response.status(500).send(`Internal Server Error: ${error.message}`);
+    }
+});
+
+
+// exports.twilioWebhook = functions.https.onRequest(async (request, response) => {
+//     try {
+//         console.log("Received request from Twilio");
+
+//         const incomingMessage = request.body.Body;
+//         const incomingNumber = request.body.From;
+//         const userOrder = await fetchOrderByPhoneNumber(incomingNumber);
+//         let dialogflowResponses;
+//         let dialogflowResponse;
+
+//         console.log(`Incoming message: ${incomingMessage} from number: ${incomingNumber}`);
+//         const sessionPath = sessionClient.projectAgentSessionPath('laundryfirebasebackend', incomingNumber); 
+//         const dialogflowRequest = {
+//             session: sessionPath,
+//             queryInput: {
+//                 text: {
+//                     text: incomingMessage,
+//                     languageCode: "en-US",
+//                 },
+//             },
+//         };
+
+
+//         console.log("Sending message to Dialogflow for intent detection.");
+
+
+
+//           try {
+//             dialogflowResponses = await sessionClient.detectIntent(dialogflowRequest);
+//         } catch (error) {
+//             console.error("Error during Dialogflow intent detection:", error);
+//             // Handle the error accordingly, e.g., send a default response and exit the function
+//              dialogflowResponse =  await sendAgentNotification(userOrder,incomingNumber,incomingMessage);
+//             response.set("Content-Type", "text/xml");
+//             response.send(`<Response><Message>${dialogflowResponse}</Message></Response>`);
+//             return; // Exit the function
+//         }
+
+
+
+//         const intentName = dialogflowResponses[0].queryResult.intent.displayName;
+//         console.log(`Detected intent: ${intentName}`);
+
+//         dialogflowResponse = dialogflowResponses[0].queryResult.fulfillmentText;
+
+//            if(intentName.endsWith("FAQ")){
+//             dialogflowResponse = await handleFAQIntent(intentName);
+//         }
+//         else if(intentName === 'HelpIntent'){
+//          dialogflowResponse = await sendAgentNotification(userOrder,incomingNumber,incomingMessage);
+
+//         }
+//         else if (!userOrder) {
+//             dialogflowResponse = handleNoOrder();
+//         } 
+//         else if (intentName === "Reschedule") {
+//              const parameters = dialogflowResponses[0].queryResult.parameters;
+//              const desiredDate = parameters && parameters.fields && parameters.fields.date && parameters.fields.date.stringValue 
+//             ? new Date(parameters.fields.date.stringValue) 
+//             : null;
+//              console.log("desired date:", desiredDate);
+//              const availableDays = await fetchAvailablePickupDays(); // Fetch the available days
+
+//            dialogflowResponse = await handleRescheduling(userOrder, desiredDate, availableDays);
+//             //...handle reschedule
+//         } 
+
+//         console.log(`Sending response: ${dialogflowResponse}`);
+//         response.set("Content-Type", "text/xml");
+//         response.send(`<Response><Message>${dialogflowResponse}</Message></Response>`);
+
+//     } catch (error) {
+//         console.error("Error processing the request:", error);
+//         response.status(500).send(`Internal Server Error: ${error.message}`);
+//     }
+// });
 
 // Convert date to a readable format like "Fri, Sept 22"
 function formatDateToReadable(date) {
@@ -24,7 +239,7 @@ function formatDateToReadable(date) {
 // Fetch the available pickup days from Firestore
 async function fetchAvailablePickupDays() {
     const db = admin.firestore();
-    const docRef = db.collection('AvailableTime').doc('1G131OEdGLBqobPVkTt0'); 
+    const docRef = db.collection('AvailableTime').doc('TmwK1UygAPqEgUYpC5mm');
     const doc = await docRef.get();
 
     if (!doc.exists) {
@@ -70,7 +285,7 @@ async function fetchOrderByPhoneNumber(phoneNumber) {
     if (snapshot.empty) {
         console.log('No order found for the provided phone number.');
         return null;
-    } 
+    }
 
     const doc = snapshot.docs[0];
     return {
@@ -96,18 +311,19 @@ async function updateOrderDate(orderId, field, newDate) {
 }
 
 
-async function sendAgentNotification(userOrder, incomingNumber, incomingMessage) {
+async function sendAgentNotification(incomingNumber, incomingMessage) {
+    // async function sendAgentNotification(userOrder, incomingNumber, incomingMessage) {
     try {
         let bodyText;
         let responseMessage;
-        if (userOrder) {
+        // if (userOrder) {
 
-            bodyText = `Customer at ${userOrder.data.number} needs assistance https://flex.twilio.com/agent-desktop/\nName: ${userOrder.data.name}\nmessage = ${incomingMessage}.`;
-              responseMessage = `Hello ${userOrder.data.name}, a Live agent will reach back to you soon 😊`;
-        } else {
-            bodyText = `Customer at ${incomingNumber} needs assistance https://flex.twilio.com/agent-desktop/\n\nmessage = ${incomingMessage}.`;
-              responseMessage = `Hello, a Live agent will reach back to you soon 😊`;
-        }
+        //     bodyText = `Customer at ${userOrder.data.number} needs assistance https://flex.twilio.com/agent-desktop/\nName: ${userOrder.data.name}\nmessage = ${incomingMessage}.`;
+        //       responseMessage = `Hello ${userOrder.data.name}, a Live agent will reach back to you soon 😊`;
+        // } else {
+        bodyText = `Customer at ${incomingNumber} needs assistance https://flex.twilio.com/agent-desktop/\n\nmessage = ${incomingMessage}.`;
+        responseMessage = `Hello, a Live agent will reach back to you soon 😊`;
+        // }
 
         await twilioClient.messages.create({
             body: bodyText,
@@ -115,7 +331,7 @@ async function sendAgentNotification(userOrder, incomingNumber, incomingMessage)
             to: agentNumber
         });
         console.log('Notification sent to agent.');
-       return responseMessage;
+        return responseMessage;
     } catch (error) {
         console.error('Failed to notify agent:', error.message);
     }
@@ -154,91 +370,6 @@ async function canRescheduleForToday(desiredDate) {
 }
 
 
-
-
-exports.twilioWebhook = functions.https.onRequest(async (request, response) => {
-    try {
-        console.log("Received request from Twilio");
-
-        const incomingMessage = request.body.Body;
-        const incomingNumber = request.body.From;
-        const userOrder = await fetchOrderByPhoneNumber(incomingNumber);
-        let dialogflowResponses;
-        let dialogflowResponse;
-        
-        console.log(`Incoming message: ${incomingMessage} from number: ${incomingNumber}`);
-        const sessionPath = sessionClient.projectAgentSessionPath('laundryfirebasebackend', incomingNumber); 
-        const dialogflowRequest = {
-            session: sessionPath,
-            queryInput: {
-                text: {
-                    text: incomingMessage,
-                    languageCode: "en-US",
-                },
-            },
-        };
-
-
-        console.log("Sending message to Dialogflow for intent detection.");
-
-        
-
-          try {
-            dialogflowResponses = await sessionClient.detectIntent(dialogflowRequest);
-        } catch (error) {
-            console.error("Error during Dialogflow intent detection:", error);
-            // Handle the error accordingly, e.g., send a default response and exit the function
-             dialogflowResponse =  await sendAgentNotification(userOrder,incomingNumber,incomingMessage);
-            response.set("Content-Type", "text/xml");
-            response.send(`<Response><Message>${dialogflowResponse}</Message></Response>`);
-            return; // Exit the function
-        }
-
-
-
-        const intentName = dialogflowResponses[0].queryResult.intent.displayName;
-        console.log(`Detected intent: ${intentName}`);
-
-        dialogflowResponse = dialogflowResponses[0].queryResult.fulfillmentText;
-
-           if(intentName.endsWith("FAQ")){
-            dialogflowResponse = await handleFAQIntent(intentName);
-        }
-        else if(intentName === 'HelpIntent'){
-         dialogflowResponse = await sendAgentNotification(userOrder,incomingNumber,incomingMessage);
-
-        }
-        else if (!userOrder) {
-            dialogflowResponse = handleNoOrder();
-        } 
-        else if (intentName === "Reschedule") {
-             const parameters = dialogflowResponses[0].queryResult.parameters;
-             const desiredDate = parameters && parameters.fields && parameters.fields.date && parameters.fields.date.stringValue 
-            ? new Date(parameters.fields.date.stringValue) 
-            : null;
-             console.log("desired date:", desiredDate);
-             const availableDays = await fetchAvailablePickupDays(); // Fetch the available days
-
-           dialogflowResponse = await handleRescheduling(userOrder, desiredDate, availableDays);
-            //...handle reschedule
-        } 
-
-
-        
-
-
-
-        
-
-        console.log(`Sending response: ${dialogflowResponse}`);
-        response.set("Content-Type", "text/xml");
-        response.send(`<Response><Message>${dialogflowResponse}</Message></Response>`);
-
-    } catch (error) {
-        console.error("Error processing the request:", error);
-        response.status(500).send(`Internal Server Error: ${error.message}`);
-    }
-});
 
 function isDatePresentOrFuture(dialogflowDate) {
     const inputDate = new Date(dialogflowDate);
@@ -314,18 +445,18 @@ async function updateRescheduleDate(orderId, type, newDate) {
         return;
     }
 
-    
+
     const formattedDate = `${newDate.getFullYear()}-${String(newDate.getMonth() + 1).padStart(2, '0')}-${String(newDate.getDate()).padStart(2, '0')}`;
 
-     try {
-    await orderRef.update({
-        [fieldToUpdate]: formattedDate,
-        'order_status': order_statusfield
-    });
-    console.log(`Successfully updated order status and ${fieldToUpdate} for order ${orderId}`);
-} catch (error) {
-    console.error("Error updating the document:", error);
-}
+    try {
+        await orderRef.update({
+            [fieldToUpdate]: formattedDate,
+            'order_status': order_statusfield
+        });
+        console.log(`Successfully updated order status and ${fieldToUpdate} for order ${orderId}`);
+    } catch (error) {
+        console.error("Error updating the document:", error);
+    }
 }
 
 function handleInvalidOrderStatus() {
@@ -337,24 +468,24 @@ function handleInvalidOrderStatus() {
 
 async function handleFAQIntent(intentName) {
     const faqDoc = await admin.firestore().collection('faqResponses').doc(intentName).get();
-    
+
     let responseText = "";
-    
+
     if (faqDoc.exists) {
         responseText = faqDoc.data().response;
-        
+
         // if (intentName === 'PricingInfoFAQ') {
         //     if (responseText.includes("{price_per_pound}")) {
         //         const pricePerPound = await fetchPricePerPound(); // Assume a function that fetches price per pound
         //         responseText = responseText.replace("{price_per_pound}", pricePerPound);
         //     }
-            
+
         //     if (responseText.includes("{comforter_bedding_price}")) {
         //         const comforterBeddingPrice = await fetchComforterBeddingPrice(); // Assume a function that fetches comforter bedding price
         //         responseText = responseText.replace("{comforter_bedding_price}", comforterBeddingPrice);
         //     }
         // }
-        
+
     } else {
         console.warn(`No FAQ found in Firestore for intent: ${intentName}`);
         responseText = "I'm sorry, I couldn't find information on that.";
@@ -364,3 +495,8 @@ async function handleFAQIntent(intentName) {
 
     return responseText;
 }
+
+module.exports = {
+    twilioWebhook,
+    checkIfWorkspaceExists
+};
